@@ -337,9 +337,9 @@ schulapp-backend/
 
 **Ziel:** Lehrer laden Materialien hoch, Schüler können herunterladen.
 
-1. `multer` Upload (max 50 MB, MIME-Type-Prüfung)
-2. Download nur mit gültigem JWT — kein direkter Dateizugriff
-3. Ordner-Hierarchie mit rekursiver Query für Breadcrumb-Navigation
+1. Go `multipart.Reader` für Upload (max 50 MB, MIME-Type-Prüfung mit `http.DetectContentType`)
+2. Download-Handler prüft JWT — kein direkter Dateizugriff ohne Auth
+3. Rekursive SQL-Query (CTE) für Ordner-Hierarchie + Breadcrumb
 4. Explorer-Layout, Drag-and-Drop mit Fortschrittsanzeige, Dateivorschau
 
 ---
@@ -359,11 +359,12 @@ schulapp-backend/
 
 **Ziel:** Echtzeit-Kommunikation zwischen Lehrern und Schülern.
 
-1. Socket.io mit JWT-Auth für Handshake-Authentifizierung
-2. Socket-Events: `send_message` → broadcastet `new_message`, `typing`, `mark_read`
-3. REST für Kanal-Erstellung + historische Nachrichten (Cursor-Pagination)
-4. Zweispaltiges Layout: Kanalliste | Nachrichtenthread
-5. Virtuelles Scrolling für alte Nachrichten, ungelesene Badges, Tipp-Indikator
+1. `gorilla/websocket` Hub in `internal/ws/hub.go` — ein goroutine pro Verbindung
+2. JWT-Validierung beim WebSocket-Upgrade (Query-Parameter `?token=...`)
+3. Nachrichten-Events: `send_message` → Hub broadcastet `new_message`, `typing`, `mark_read`
+4. REST für Kanal-Erstellung + historische Nachrichten (Cursor-Pagination via sqlc)
+5. Zweispaltiges Layout: Kanalliste | Nachrichtenthread
+6. Virtuelles Scrolling, ungelesene Badges, Tipp-Indikator
 
 ---
 
@@ -372,38 +373,67 @@ schulapp-backend/
 **Ziel:** Vollständig nutzbare, robuste App.
 
 1. Rollenspezifisches Dashboard: Schüler sehen Vertretungen + Hausaufgaben + Termine, Lehrer sehen Klassen + Abgaben + Nachrichten
-2. Benachrichtigungs-Tabelle + Socket.io Push + `NotificationBell`
+2. Benachrichtigungs-Tabelle + WebSocket Push + `NotificationBell`
 3. Globale Error-Boundary, Toast-Notifications, Skeleton-Loader
-4. Alle Inputs serverseitig mit `zod` validieren
-5. CSRF-Schutz (`sameSite: 'strict'`), Dateinamen sanitisieren
+4. Alle Inputs serverseitig in Go validieren (generierte Typen aus OpenAPI + eigene Checks)
+5. CSRF-Schutz (`sameSite: 'strict'`), Dateinamen sanitisieren (`filepath.Base`)
 6. Mobile Responsiveness: Sidebar als Drawer auf kleinen Screens
 
 ---
 
 ## Installation
 
+### Voraussetzungen
+
+- Go 1.22+
+- Node.js 20+
+- PostgreSQL (lokal oder Docker)
+- `oapi-codegen`: `go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest`
+- `sqlc`: `go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest`
+- `golang-migrate`: `go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest`
+
 ### Backend
 
 ```bash
 cd schulapp-backend
-npm install express prisma @prisma/client bcrypt jsonwebtoken cookie-parser cors express-rate-limit zod multer socket.io
-npm install -D typescript ts-node @types/express @types/bcrypt @types/jsonwebtoken @types/multer nodemon
+
+# Go-Abhängigkeiten
+go mod tidy
+
+# Code aus openapi.yaml und SQL-Queries generieren
+make generate
 
 # Datenbank migrieren
-npx prisma migrate dev --name init
+make migrate
 
 # Seed-Daten anlegen
-npx ts-node prisma/seed.ts
+go run seed/main.go
 
 # Server starten
-npm run dev
+go run cmd/server/main.go
+# oder mit Live-Reload:
+air
+```
+
+Umgebungsvariablen (`.env`):
+```env
+DATABASE_URL=postgres://user:pass@localhost:5432/schulapp
+JWT_SECRET=your-secret-here
+PORT=8080
+UPLOAD_DIR=./uploads
 ```
 
 ### Frontend
 
 ```bash
 cd codeclub-ui
-npm install axios zustand @tanstack/react-query react-router-dom socket.io-client
+
+# TypeScript-Client aus openapi.yaml generieren
+npx @openapitools/openapi-generator-cli generate \
+  -i ../schulapp-backend/openapi.yaml \
+  -g typescript-axios -o src/api/generated
+
+npm install axios zustand @tanstack/react-query react-router-dom
 
 npm run dev       # Entwicklung
 npm run build     # Produktion → dist/
@@ -429,9 +459,11 @@ Erst danach im Frontend anbinden.
 
 ```
 Frontend (statische Dateien)   →  dist/ per Webserver ausliefern
-Backend (Prozess)              →  Node-Server auf Port starten
+Backend (Go Binary)            →  go build → einzelne Binary starten
 Datenbank                      →  PostgreSQL-Dienst bereitstellen
 ```
+
+Ein Go-Backend kompiliert zu einer **einzelnen statischen Binary** ohne externe Laufzeit. Das macht das Deployment einfacher als bei Node oder Python: Binary auf den Server kopieren, starten, fertig.
 
 - [ ] Frontend gebaut (`npm run build`) und erreichbar?
 - [ ] Backend läuft als Prozess auf dem Server?
@@ -450,7 +482,7 @@ Datenbank                      →  PostgreSQL-Dienst bereitstellen
 | Art | Beispiel | Läuft wo? | Deployment |
 |---|---|---|---|
 | Statische Dateien | Vite/React `dist/` | im Browser | Dateien kopieren und ausliefern |
-| Backend/API | Express-Server | auf dem Server | Programm starten, als Prozess betreiben |
+| Backend/API | Go Binary | auf dem Server | `go build` → Binary kopieren und starten |
 | Full-Stack-Framework | React Router v7, Next.js | Browser und Server | Server-Prozess + Assets |
 
 ---
