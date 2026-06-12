@@ -1,0 +1,17 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e8]: S
+      - heading "Anmelden" [level=1] [ref=e9]
+      - paragraph [ref=e10]: Willkommen bei SchulApp
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - generic [ref=e13]: E-Mail
+        - textbox "E-Mail" [active] [ref=e14]:
+          - /placeholder: max.mustermann@schule.de
+      - generic [ref=e15]:
+        - generic [ref=e16]: Passwort
+        - textbox "Passwort" [ref=e17]:
+          - /placeholder: ••••••••
+      - button "Anmelden" [ref=e18]
+  - paragraph [ref=e19]: SchulApp — Sicher und datenschutzkonform
