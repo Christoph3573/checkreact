@@ -7,7 +7,7 @@ Eine webbasierte Schul-App mit Schüler- und Lehrer-Login, Vertretungsplan, Kale
 ## Das System auf einen Blick
 
 ```
-Browser → Reverse Proxy → Frontend (React) → Backend (Express) → Datenbank (PostgreSQL)
+Browser → Reverse Proxy → Frontend (React) → Backend (Go) → Datenbank (PostgreSQL)
 ```
 
 | Teil | Aufgabe |
@@ -27,11 +27,13 @@ Browser → Reverse Proxy → Frontend (React) → Backend (Express) → Datenba
 | Frontend | React + TypeScript + Vite + Tailwind CSS |
 | Routing | React Router v7 |
 | State | Zustand + React Query |
-| Backend | Node.js + Express + TypeScript |
-| Datenbank | PostgreSQL + Prisma ORM |
+| Backend | Go + chi (HTTP-Router) |
+| API-Vertrag | OpenAPI 3.1 + oapi-codegen |
+| Datenbank | PostgreSQL + sqlc (typsichere SQL-Queries) |
+| Migrationen | golang-migrate |
 | Auth | JWT (Access Token im Memory + Refresh Token als HttpOnly-Cookie) |
-| Echtzeit | Socket.io (Chat) |
-| Datei-Upload | Multer |
+| Echtzeit | gorilla/websocket (Chat) |
+| Datei-Upload | Go stdlib `multipart` |
 
 ---
 
@@ -66,7 +68,32 @@ Worauf geachtet werden muss:
 
 ### OpenAPI als Vertrag
 
-Frontend und Backend nutzen einen gemeinsamen API-Vertrag (OpenAPI). Das hilft dabei, sich auf Endpunkte und Datenstrukturen zu einigen, Dokumentation nah am Code zu halten und Tippfehler bei Feldnamen früh zu erkennen.
+Die `openapi.yaml` ist die **einzige Quelle der Wahrheit** für alle Endpunkte, Request-Bodies und Response-Typen.
+
+```
+openapi.yaml
+    ↓ oapi-codegen
+schulapp-backend/internal/api/generated.go   ← Go Handler-Interfaces + Typen
+    ↓ openapi-typescript-codegen (oder orval)
+codeclub-ui/src/api/generated.ts             ← TypeScript-Typen + fetch-Wrapper
+```
+
+**Workflow:**
+1. Endpunkt in `openapi.yaml` beschreiben
+2. `make generate` läuft beide Codegeneratoren
+3. Go: generierten Interface implementieren
+4. TypeScript: generierten Client im Hook nutzen
+
+Das verhindert Tippfehler bei Feldnamen, sorgt für konsistente Statuscodes und macht Breaking Changes sofort sichtbar — der Compiler meckert, bevor der Browser es tut.
+
+**Vorteile gegenüber händisch geschriebenen Clients:**
+- Kein manuelles Synchronisieren von Typen zwischen Go und TypeScript
+- Automatische API-Dokumentation (z. B. mit Swagger UI oder Scalar)
+- Neue Teammitglieder sehen sofort alle Endpunkte
+
+**Wann es aufwendiger wird:**
+- Die Spezifikation muss bei jedem Endpunkt-Umbau aktualisiert werden
+- Generierter Code sieht manchmal ungewohnt aus — nicht anfassen, neu generieren
 
 ---
 
@@ -161,7 +188,7 @@ POST   /channels/:id/messages           Nachricht senden
 PATCH  /channels/:id/read               Gelesen-Markierung
 ```
 
-**Socket.io Events:** `send_message` → `new_message`, `typing` → `user_typing`, `mark_read`
+**WebSocket Events:** `send_message` → `new_message`, `typing` → `user_typing`, `mark_read`
 
 ### Hausaufgaben `/api/v1/homework`
 ```
@@ -206,16 +233,35 @@ codeclub-ui/src/
 
 ```
 schulapp-backend/
-├── prisma/
-│   ├── schema.prisma
-│   └── seed.ts           1 Admin, 3 Lehrer, 10 Schüler, 2 Klassen
-├── src/
-│   ├── index.ts          Express-Server, Middleware
-│   ├── config/           Prisma Client, Env-Validierung (zod)
-│   ├── middleware/        JWT-Auth, Rollen-Check, Error-Handler
-│   ├── routes/           Ein File pro Feature
-│   └── socket/           Socket.io Handler (Chat)
-└── uploads/              Lokaler Datei-Speicher
+├── openapi.yaml                    API-Spezifikation (Quelle der Wahrheit)
+├── Makefile                        make generate, make migrate, make run
+├── cmd/
+│   └── server/
+│       └── main.go                 Entry Point, Dependency Wiring
+├── internal/
+│   ├── api/
+│   │   ├── generated.go            oapi-codegen Output — nicht manuell bearbeiten
+│   │   └── handler/                Implementierungen der generierten Interfaces
+│   │       ├── auth.go
+│   │       ├── users.go
+│   │       ├── classes.go
+│   │       ├── substitutions.go
+│   │       ├── events.go
+│   │       ├── files.go
+│   │       ├── homework.go
+│   │       └── chat.go
+│   ├── db/
+│   │   ├── query/                  SQL-Queries für sqlc
+│   │   └── generated/              sqlc Output — nicht manuell bearbeiten
+│   ├── middleware/
+│   │   ├── auth.go                 JWT verifizieren, User in Context setzen
+│   │   └── role.go                 Rollen prüfen
+│   └── ws/
+│       └── hub.go                  WebSocket Hub (Chat-Echtzeit)
+├── migrations/                     SQL-Migrationsdateien (golang-migrate)
+├── uploads/                        Lokaler Datei-Speicher
+└── seed/
+    └── main.go                     Testdaten: 1 Admin, 3 Lehrer, 10 Schüler
 ```
 
 ---
@@ -227,25 +273,27 @@ schulapp-backend/
 **Ziel:** Lauffähige Infrastruktur, Login funktioniert end-to-end.
 
 **Backend:**
-1. Express + Prisma + PostgreSQL aufsetzen
-2. Datenbankschema migrieren (`npx prisma migrate dev`)
-3. `bcrypt`-Passwort-Hashing + JWT-Middleware
-4. `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me`
-5. Rate Limiting auf Login-Endpunkt
+1. Go-Modul anlegen, `chi`, `golang-jwt`, `bcrypt`, `sqlc`, `golang-migrate` hinzufügen
+2. `openapi.yaml` mit Auth-Endpunkten beschreiben, `make generate` ausführen
+3. Migrationen schreiben, `make migrate` ausführen
+4. `bcrypt`-Passwort-Hashing + JWT-Middleware in `internal/middleware/auth.go`
+5. `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me` als Handler implementieren
+6. Rate Limiting auf Login-Endpunkt (`golang.org/x/time/rate`)
 
 **Frontend:**
-1. Axios-Client mit Token-Interceptor (automatischer Refresh bei 401)
+1. Generierten TypeScript-Client aus `openapi.yaml` einbinden (`make generate`)
 2. `authStore` mit Zustand: `user`, `accessToken`, `login()`, `logout()`
 3. Access Token nur im Memory, Refresh Token als HttpOnly-Cookie
-4. `LoginPage.tsx` mit Fehlerbehandlung
-5. `ProtectedRoute` + `RoleRoute` (student / teacher / admin)
-6. `AppLayout` + rollenbasierte `Sidebar`
+4. Axios-Interceptor für automatischen Token-Refresh bei 401
+5. `LoginPage.tsx` mit Fehlerbehandlung
+6. `ProtectedRoute` + `RoleRoute` (student / teacher / admin)
+7. `AppLayout` + rollenbasierte `Sidebar`
 
 **Sicherheit:**
-- Passwörter: `bcrypt` mit `saltRounds: 12`
+- Passwörter: `bcrypt` mit Cost 12
 - Access Token: 15 Minuten Laufzeit, nur im Memory
 - Refresh Token: 7 Tage, nur als HttpOnly-Cookie
-- Rate Limiting: `express-rate-limit`
+- Rate Limiting auf `/auth/login`
 
 ---
 
@@ -253,10 +301,11 @@ schulapp-backend/
 
 **Ziel:** Admin kann Benutzer und Klassen verwalten.
 
-1. CRUD-Endpunkte für Benutzer (Admin-only via `requireRole('admin')`)
-2. CRUD-Endpunkte für Klassen + Mitglieder zuweisen
-3. Seed-Skript ausführen
-4. Admin-Seiten: Benutzertabelle mit Suche, Klassenverwaltung mit Zuweisung
+1. Endpunkte in `openapi.yaml` ergänzen, `make generate`
+2. CRUD-Handler für Benutzer (Middleware: `RequireRole("admin")`)
+3. CRUD-Handler für Klassen + Mitglieder zuweisen
+4. `go run seed/main.go` für Testdaten
+5. Admin-Seiten: Benutzertabelle mit Suche, Klassenverwaltung mit Zuweisung
 
 ---
 
@@ -264,10 +313,11 @@ schulapp-backend/
 
 **Ziel:** Lehrer pflegen Vertretungen, Schüler sehen sie tagesaktuell.
 
-1. CRUD-Endpunkte mit automatischer Filterung nach Klasse des Schülers
-2. Tagesansicht mit Farbkodierung: Ausfall = rot, Vertretung = gelb, Raumänderung = blau
-3. Auto-Refresh alle 5 Minuten (React Query `refetchInterval`)
-4. Lehrer-Formular zum Erstellen/Bearbeiten
+1. Endpunkte + Typen in `openapi.yaml`, `make generate`
+2. Go-Handler mit automatischer Filterung nach Klasse des eingeloggten Schülers
+3. Tagesansicht mit Farbkodierung: Ausfall = rot, Vertretung = gelb, Raumänderung = blau
+4. Auto-Refresh alle 5 Minuten (React Query `refetchInterval`)
+5. Lehrer-Formular zum Erstellen/Bearbeiten
 
 ---
 
